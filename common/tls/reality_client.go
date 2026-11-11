@@ -118,12 +118,12 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	for _, extension := range uConn.Extensions {
 		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
 			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
-				return curveID != utls.X25519MLKEM768
+				return curveID != utls.X25519MLKEM768 && curveID != utls.X25519Kyber768Draft00
 			})
 		}
 		if ks, ok := extension.(*utls.KeyShareExtension); ok {
 			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
-				return share.Group != utls.X25519MLKEM768
+				return share.Group != utls.X25519MLKEM768 && share.Group != utls.X25519Kyber768Draft00
 			})
 		}
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/ntp"
 
@@ -58,7 +59,9 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if c.recordFragment {
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
-	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos}, nil
+	uConn := utls.UClient(conn, c.config.Clone(), c.id)
+	stripUnsupportedCurves(uConn)
+	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos}, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
@@ -275,4 +278,29 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	default:
 		return utls.ClientHelloID{}, E.New("unknown uTLS fingerprint: ", name)
 	}
+}
+
+// stripUnsupportedCurves removes curves that the uTLS handshake
+// builder cannot compute key shares for. The retired
+// X25519Kyber768Draft00 still leads the curve list of some
+// fingerprint templates (e.g. the Chrome PQ parrots); leaving it in
+// place aborts every handshake with "tls: CurvePreferences includes
+// unsupported curve".
+func stripUnsupportedCurves(uConn *utls.UConn) {
+	if err := uConn.BuildHandshakeState(); err != nil {
+		return
+	}
+	for _, extension := range uConn.Extensions {
+		switch ext := extension.(type) {
+		case *utls.SupportedCurvesExtension:
+			ext.Curves = common.Filter(ext.Curves, func(curveID utls.CurveID) bool {
+				return curveID != utls.X25519Kyber768Draft00
+			})
+		case *utls.KeyShareExtension:
+			ext.KeyShares = common.Filter(ext.KeyShares, func(share utls.KeyShare) bool {
+				return share.Group != utls.X25519Kyber768Draft00
+			})
+		}
+	}
+	_ = uConn.BuildHandshakeState()
 }
