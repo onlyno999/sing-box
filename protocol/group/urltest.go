@@ -135,6 +135,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	}
 	conn, err := outbound.DialContext(ctx, network, destination)
 	if err == nil {
+		conn = trackMemberConnection(s.router, conn, outbound.Tag())
 		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
 	s.logger.ErrorContext(ctx, err)
@@ -153,6 +154,7 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 	}
 	conn, err := outbound.ListenPacket(ctx, destination)
 	if err == nil {
+		conn = trackMemberPacketConnection(s.router, conn, outbound.Tag())
 		return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
 	s.logger.ErrorContext(ctx, err)
@@ -410,4 +412,34 @@ func (g *URLTestGroup) performUpdateCheck() {
 	if updated {
 		g.interruptGroup.Interrupt(g.interruptExternalConnections)
 	}
+}
+
+// trackMemberConnection attributes a connection this group dialed
+// through one of its members to that member's traffic counters, via
+// any registered tracker that supports it. Without this, routed
+// traffic is only ever visible under the group's own tag (the route
+// rule matches the group), and the member doing the work records
+// nothing.
+func trackMemberConnection(router adapter.Router, conn net.Conn, memberTag string) net.Conn {
+	if router == nil {
+		return conn
+	}
+	for _, tracker := range router.ConnectionTrackers() {
+		if outboundTracker, ok := tracker.(adapter.OutboundTrafficTracker); ok {
+			return outboundTracker.TrackOutboundConnection(conn, memberTag)
+		}
+	}
+	return conn
+}
+
+func trackMemberPacketConnection(router adapter.Router, conn net.PacketConn, memberTag string) net.PacketConn {
+	if router == nil {
+		return conn
+	}
+	for _, tracker := range router.ConnectionTrackers() {
+		if outboundTracker, ok := tracker.(adapter.OutboundTrafficTracker); ok {
+			return outboundTracker.TrackOutboundPacketConnection(conn, memberTag)
+		}
+	}
+	return conn
 }

@@ -207,6 +207,10 @@ func (r *Router) AppendTracker(tracker adapter.ConnectionTracker) {
 	r.trackers = append(r.trackers, tracker)
 }
 
+func (r *Router) ConnectionTrackers() []adapter.ConnectionTracker {
+	return r.trackers
+}
+
 func (r *Router) ResetNetwork() {
 	r.network.ResetNetwork()
 	r.dns.ResetNetwork()

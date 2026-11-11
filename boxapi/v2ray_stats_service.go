@@ -115,6 +115,58 @@ func (s *SbStatsService) RoutedPacketConnection(ctx context.Context, conn N.Pack
 	return bufio.NewInt64CounterPacketConn(conn, readCounter, nil, writeCounter, nil)
 }
 
+// TrackOutboundConnection attributes a connection dialed through the
+// outbound named by outboundTag to that outbound's counters. It is the
+// dial-side counterpart of RoutedConnection: bytes read from the
+// connection are downlink, bytes written are uplink. Tags outside the
+// registered set are ignored, exactly as in RoutedConnection.
+func (s *SbStatsService) TrackOutboundConnection(conn net.Conn, outboundTag string) net.Conn {
+	if s == nil || outboundTag == "" || !s.outbounds[outboundTag] {
+		return conn
+	}
+	return s.RoutedConnectionInternal("", outboundTag, "", conn, false)
+}
+
+// TrackOutboundPacketConnection is TrackOutboundConnection for packet
+// connections: bytes read from the member are downlink, bytes written
+// to it are uplink.
+func (s *SbStatsService) TrackOutboundPacketConnection(conn net.PacketConn, outboundTag string) net.PacketConn {
+	if s == nil || outboundTag == "" || !s.outbounds[outboundTag] {
+		return conn
+	}
+	s.access.Lock()
+	readCounter := s.loadOrCreateCounter("outbound>>>" + outboundTag + ">>>traffic>>>downlink")
+	writeCounter := s.loadOrCreateCounter("outbound>>>" + outboundTag + ">>>traffic>>>uplink")
+	s.access.Unlock()
+	return &outboundPacketCounterConn{
+		PacketConn:   conn,
+		readCounter:  readCounter,
+		writeCounter: writeCounter,
+	}
+}
+
+type outboundPacketCounterConn struct {
+	net.PacketConn
+	readCounter  *atomic.Int64
+	writeCounter *atomic.Int64
+}
+
+func (c *outboundPacketCounterConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, addr, err := c.PacketConn.ReadFrom(p)
+	if n > 0 {
+		c.readCounter.Add(int64(n))
+	}
+	return n, addr, err
+}
+
+func (c *outboundPacketCounterConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	n, err := c.PacketConn.WriteTo(p, addr)
+	if n > 0 {
+		c.writeCounter.Add(int64(n))
+	}
+	return n, err
+}
+
 func (s *SbStatsService) GetStats(ctx context.Context, name string, reset bool) (int64, error) {
 	s.access.Lock()
 	counter, loaded := s.counters[name]

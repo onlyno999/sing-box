@@ -25,12 +25,23 @@ type Router interface {
 	NeedWIFIState() bool
 	Rules() []Rule
 	AppendTracker(tracker ConnectionTracker)
+	ConnectionTrackers() []ConnectionTracker
 	ResetNetwork()
 }
 
 type ConnectionTracker interface {
 	RoutedConnection(ctx context.Context, conn net.Conn, metadata InboundContext, matchedRule Rule, matchOutbound Outbound) net.Conn
 	RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata InboundContext, matchedRule Rule, matchOutbound Outbound) N.PacketConn
+}
+
+// OutboundTrafficTracker is an optional extension of ConnectionTracker:
+// it lets a group outbound attribute a connection it dialed through one
+// of its members to that member's own traffic counters. RoutedConnection
+// only ever sees the outbound matched by the route rule (the group), so
+// without this hook the member carrying the traffic records nothing.
+type OutboundTrafficTracker interface {
+	TrackOutboundConnection(conn net.Conn, outboundTag string) net.Conn
+	TrackOutboundPacketConnection(conn net.PacketConn, outboundTag string) net.PacketConn
 }
 
 // Deprecated: Use ConnectionRouterEx instead.
