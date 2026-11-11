@@ -1,4 +1,3 @@
-//go:build !with_quic
 
 package v2rayxhttp
 
