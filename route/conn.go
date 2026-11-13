@@ -41,6 +41,19 @@ func NewConnectionManager(logger logger.ContextLogger) *ConnectionManager {
 	}
 }
 
+// reportDialResult feeds one real dial outcome into the core's
+// per-outbound dial-health counters (see adapter/dial_health.go):
+// a failed dial through an outbound means its handshake never
+// came back. Canceled dials prove nothing and are not counted.
+func reportDialResult(ctx context.Context, this N.Dialer, success bool) {
+	if !success && ctx.Err() != nil {
+		return
+	}
+	if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
+		adapter.RecordDialResult(outbound.Tag(), success)
+	}
+}
+
 func (m *ConnectionManager) Start(stage adapter.StartStage) error {
 	return nil
 }
@@ -78,10 +91,12 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 			dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 		}
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
+		reportDialResult(ctx, this, false)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		m.logger.ErrorContext(ctx, err)
 		return
 	}
+	reportDialResult(ctx, this, true)
 	err = N.ReportConnHandshakeSuccess(conn, remoteConn)
 	if err != nil {
 		err = E.Cause(err, "report handshake success")
@@ -143,6 +158,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
 			err = E.Cause(err, "open packet connection to ", remoteString, dialerString)
+			reportDialResult(ctx, this, false)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
@@ -164,11 +180,13 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
 			err = E.Cause(err, "listen packet connection using ", dialerString)
+			reportDialResult(ctx, this, false)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
 		}
 	}
+	reportDialResult(ctx, this, true)
 	err = N.ReportPacketConnHandshakeSuccess(conn, remotePacketConn)
 	if err != nil {
 		conn.Close()
