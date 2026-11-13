@@ -44,7 +44,6 @@ type URLTest struct {
 	idleTimeout                  time.Duration
 	group                        *URLTestGroup
 	interruptExternalConnections bool
-	race                         bool
 }
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
@@ -61,7 +60,6 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		tolerance:                    options.Tolerance,
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
-		race:                         options.Race,
 	}
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
@@ -119,9 +117,6 @@ func (s *URLTest) CheckOutbounds() {
 }
 
 func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	if s.race && N.NetworkName(network) == N.NetworkTCP && len(s.group.outbounds) > 1 {
-		return s.raceDialContext(ctx, network, destination)
-	}
 	s.group.Touch()
 	var outbound adapter.Outbound
 	switch N.NetworkName(network) {
@@ -146,86 +141,6 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	s.logger.ErrorContext(ctx, err)
 	s.group.history.DeleteURLTestHistory(outbound.Tag())
 	return nil, err
-}
-
-// raceDialContext implements Race mode: the members dial in
-// parallel -- at most maxRaceConcurrency at a time, the rest
-// queue and take the place of failed attempts -- and the first
-// connection that comes up wins; the losers are cancelled, and
-// a connection that still completes after losing is closed on
-// the spot. The race measures the full outbound dial (proxy
-// handshake included), so the winner is the member that can
-// actually serve this connection soonest. UDP is not raced
-// (no handshake to win); ListenPacket keeps the measured-best
-// selection.
-const maxRaceConcurrency = 20
-
-func (s *URLTest) raceDialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	s.group.Touch()
-	members := s.group.outbounds
-	type raceResult struct {
-		conn     net.Conn
-		outbound adapter.Outbound
-		err      error
-	}
-	results := make(chan raceResult, len(members))
-	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var nextIndex atomic.Int32
-	var wg sync.WaitGroup
-	workers := len(members)
-	if workers > maxRaceConcurrency {
-		workers = maxRaceConcurrency
-	}
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				i := int(nextIndex.Add(1)) - 1
-				if i >= len(members) {
-					return
-				}
-				member := members[i]
-				if raceCtx.Err() != nil {
-					results <- raceResult{err: raceCtx.Err()}
-					continue
-				}
-				conn, err := member.DialContext(raceCtx, network, destination)
-				if err != nil {
-					results <- raceResult{err: err}
-					continue
-				}
-				results <- raceResult{conn: conn, outbound: member}
-			}
-		}()
-	}
-	var winner *raceResult
-	var lastErr error
-	for received := 0; received < len(members); received++ {
-		r := <-results
-		if r.err != nil {
-			lastErr = r.err
-			continue
-		}
-		if winner == nil {
-			w := r
-			winner = &w
-			cancel()
-			continue
-		}
-		r.conn.Close()
-	}
-	wg.Wait()
-	if winner == nil {
-		if lastErr != nil {
-			s.logger.ErrorContext(ctx, lastErr)
-			return nil, lastErr
-		}
-		return nil, E.New("missing supported outbound")
-	}
-	conn := trackMemberConnection(s.router, winner.conn, winner.outbound.Tag())
-	return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 }
 
 func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
