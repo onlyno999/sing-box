@@ -3,6 +3,7 @@ package group
 import (
 	"context"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,7 @@ type URLTest struct {
 	idleTimeout                  time.Duration
 	group                        *URLTestGroup
 	interruptExternalConnections bool
+	race                         bool
 }
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
@@ -60,6 +62,7 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		tolerance:                    options.Tolerance,
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
+		race:                         options.Race,
 	}
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
@@ -117,6 +120,11 @@ func (s *URLTest) CheckOutbounds() {
 }
 
 func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if s.race && N.NetworkName(network) == N.NetworkTCP {
+		if conn, err, raced := s.raceDialContext(ctx, network, destination); raced {
+			return conn, err
+		}
+	}
 	s.group.Touch()
 	var outbound adapter.Outbound
 	switch N.NetworkName(network) {
@@ -141,6 +149,103 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	s.logger.ErrorContext(ctx, err)
 	s.group.history.DeleteURLTestHistory(outbound.Tag())
 	return nil, err
+}
+
+// raceCandidateLimit is the fork's race scope: only the three
+// best-measured members of a group race a new connection.
+const raceCandidateLimit = 3
+
+// raceCandidates returns up to raceCandidateLimit members that
+// support the network, best measured delay first; members without
+// a measurement fill the remaining slots in declared order.
+func (g *URLTestGroup) raceCandidates(network string) []adapter.Outbound {
+	type scored struct {
+		outbound adapter.Outbound
+		delay    uint16
+		measured bool
+	}
+	var members []scored
+	for _, detour := range g.outbounds {
+		if !common.Contains(detour.Network(), network) {
+			continue
+		}
+		if history := g.history.LoadURLTestHistory(RealTag(detour)); history != nil {
+			members = append(members, scored{detour, history.Delay, true})
+		} else {
+			members = append(members, scored{outbound: detour})
+		}
+	}
+	sort.SliceStable(members, func(i, j int) bool {
+		if members[i].measured != members[j].measured {
+			return members[i].measured
+		}
+		return members[i].delay < members[j].delay
+	})
+	if len(members) > raceCandidateLimit {
+		members = members[:raceCandidateLimit]
+	}
+	candidates := make([]adapter.Outbound, 0, len(members))
+	for _, member := range members {
+		candidates = append(candidates, member.outbound)
+	}
+	return candidates
+}
+
+// raceDialContext races the group's best candidates for one new
+// TCP connection. The first successful dial wins and is returned
+// at once; the losers are cancelled and drained in the background,
+// so a member that ignores cancellation can never stall the
+// winner (the failure mode of the first race experiment).
+// The third return value reports whether racing applied at all;
+// with fewer than two candidates the caller uses the normal path.
+func (s *URLTest) raceDialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error, bool) {
+	s.group.Touch()
+	candidates := s.group.raceCandidates(network)
+	if len(candidates) < 2 {
+		return nil, nil, false
+	}
+	type raceResult struct {
+		conn     net.Conn
+		outbound adapter.Outbound
+		err      error
+	}
+	results := make(chan raceResult, len(candidates))
+	raceCtx, cancel := context.WithCancel(ctx)
+	for _, member := range candidates {
+		go func(member adapter.Outbound) {
+			conn, err := member.DialContext(raceCtx, network, destination)
+			results <- raceResult{conn: conn, outbound: member, err: err}
+		}(member)
+	}
+	consumed := 0
+	var lastErr error
+	for {
+		result := <-results
+		consumed++
+		if result.err == nil {
+			cancel()
+			remaining := len(candidates) - consumed
+			if remaining > 0 {
+				go func() {
+					for i := 0; i < remaining; i++ {
+						if late := <-results; late.err == nil {
+							late.conn.Close()
+						}
+					}
+				}()
+			}
+			s.logger.DebugContext(ctx, "race3 winner ", result.outbound.Tag(), " for ", destination)
+			conn := trackMemberConnection(s.router, result.conn, result.outbound.Tag())
+			return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil, true
+		}
+		lastErr = result.err
+		s.group.history.DeleteURLTestHistory(result.outbound.Tag())
+		if consumed == len(candidates) {
+			cancel()
+			s.logger.ErrorContext(ctx, lastErr)
+			return nil, lastErr, true
+		}
+	}
 }
 
 func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

@@ -15,4 +15,8 @@ type URLTestOutboundOptions struct {
 	Tolerance                 uint16             `json:"tolerance,omitempty"`
 	IdleTimeout               badoption.Duration `json:"idle_timeout,omitempty"`
 	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
+	// Race (NekoBox++ fork addition): TCP dials race the three
+	// best-measured members in parallel; the first connection
+	// that comes up wins and is returned immediately.
+	Race bool `json:"race,omitempty"`
 }
