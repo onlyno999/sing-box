@@ -234,21 +234,20 @@ var (
 )
 
 func init() {
+	// Fork change: the "random" pool only holds desktop fingerprints
+	// that proxy servers overwhelmingly accept. Safari/iOS draws were
+	// rejected often enough in the field that one bad draw at startup
+	// poisoned every random-fingerprint node for the whole process
+	// lifetime (speed tests reporting -1, failed handshakes).
+	// "randomized" no longer generates a wild ClientHello either; it
+	// resolves to the same vetted draw.
 	modernFingerprints := []utls.ClientHelloID{
 		utls.HelloChrome_Auto,
 		utls.HelloFirefox_Auto,
 		utls.HelloEdge_Auto,
-		utls.HelloSafari_Auto,
-		utls.HelloIOS_Auto,
 	}
 	randomFingerprint = modernFingerprints[rand.Intn(len(modernFingerprints))]
-
-	weights := utls.DefaultWeights
-	weights.TLSVersMax_Set_VersionTLS13 = 1
-	weights.FirstKeyShare_Set_CurveP256 = 0
-	randomizedFingerprint = utls.HelloRandomized
-	randomizedFingerprint.Seed, _ = utls.NewPRNGSeed()
-	randomizedFingerprint.Weights = &weights
+	randomizedFingerprint = randomFingerprint
 }
 
 func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
