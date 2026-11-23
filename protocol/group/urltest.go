@@ -210,10 +210,18 @@ func (s *URLTest) raceDialContext(ctx context.Context, network string, destinati
 		err      error
 	}
 	results := make(chan raceResult, len(candidates))
-	raceCtx, cancel := context.WithCancel(ctx)
+	// No shared race context and no cancellation: every candidate
+	// dials under the caller's context, exactly like the normal
+	// single-winner path. Cancelling a shared context the moment a
+	// winner returns can poison transports whose connection state
+	// stays tied to the dial context (session pools, lazy
+	// handshakes), killing the winning connection right after it
+	// is handed over. Losers are simply abandoned: the drain below
+	// closes any that still complete, and the caller's context
+	// bounds the rest.
 	for _, member := range candidates {
 		go func(member adapter.Outbound) {
-			conn, err := member.DialContext(raceCtx, network, destination)
+			conn, err := member.DialContext(ctx, network, destination)
 			results <- raceResult{conn: conn, outbound: member, err: err}
 		}(member)
 	}
@@ -223,7 +231,6 @@ func (s *URLTest) raceDialContext(ctx context.Context, network string, destinati
 		result := <-results
 		consumed++
 		if result.err == nil {
-			cancel()
 			remaining := len(candidates) - consumed
 			if remaining > 0 {
 				go func() {
@@ -241,7 +248,6 @@ func (s *URLTest) raceDialContext(ctx context.Context, network string, destinati
 		lastErr = result.err
 		s.group.history.DeleteURLTestHistory(result.outbound.Tag())
 		if consumed == len(candidates) {
-			cancel()
 			s.logger.ErrorContext(ctx, lastErr)
 			return nil, lastErr, true
 		}
